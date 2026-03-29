@@ -281,13 +281,6 @@ async function main() {
     log("ERROR", `Falha no login: ${e.message}`); process.exit(1);
   }
 
-  try {
-    const groupInfo = await noblox.getGroup(CONFIG.groupId);
-    log("OK", `Grupo: ${groupInfo.name} | Membros: ${groupInfo.memberCount}`);
-  } catch (e) {
-    log("ERROR", `Grupo: ${e.message}`);
-  }
-
   log("INFO", `Cargos protegidos: [${CONFIG.protectedRanks.join(", ")}]`);
   log("INFO", `Salto máximo: ${CONFIG.maxRankJump} cargo`);
   log("INFO", `Dono isento: UserID ${CONFIG.ownerUserId}`);
