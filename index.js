@@ -301,15 +301,21 @@ async function main() {
   startPolling();
 }
 
-// Servidor HTTP para manter o Render ativo (evita sleep no plano free)
+// Sobe HTTP imediatamente para o Render marcar como live
+// e em paralelo inicia o bot sem depender um do outro
 const http = require("http");
-http.createServer((req, res) => {
-  res.writeHead(200);
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Anti-Raid bot online!");
-}).listen(process.env.PORT || 3000, () => {
-  log("INFO", `Servidor HTTP ativo na porta ${process.env.PORT || 3000} (Render keep-alive)`);
 });
 
-main().catch((e) => {
-  log("ERROR", `Erro fatal: ${e.message}`); process.exit(1);
+server.listen(PORT, () => {
+  log("INFO", `Servidor HTTP ativo na porta ${PORT}`);
+  // Inicia o bot APÓS o servidor estar pronto
+  main().catch((e) => {
+    log("ERROR", `Erro fatal: ${e.message}`);
+    process.exit(1);
+  });
 });
