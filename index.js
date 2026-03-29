@@ -1,6 +1,5 @@
 require("dotenv").config();
 const noblox = require("noblox.js");
-const http = require("http");
 
 const CONFIG = {
   cookie: (process.env.ROBLOX_COOKIE || "").replace(/\s+/g, "").trim(),
@@ -8,7 +7,7 @@ const CONFIG = {
   ownerUserId: parseInt(process.env.OWNER_USER_ID),
   exemptUsers: (process.env.EXEMPT_USERS || "").split(",").map(id => parseInt(id.trim())).filter(id => !isNaN(id)),
   // Ranks que podem dar up/rebaixar livremente sem limite de salto
-  exemptActorRanks: [224, 255], // ranks que podem dar up/rebaixar livremente
+  exemptActorRanks: [224, 254, 255], // ranks que podem dar up/rebaixar livremente
   maxRankJump: parseInt(process.env.MAX_RANK_JUMP) || 1,
   protectedRanks: (process.env.PROTECTED_RANKS || "")
     .split(",").map((r) => parseInt(r.trim())).filter((r) => !isNaN(r)),
@@ -302,15 +301,15 @@ async function main() {
   startPolling();
 }
 
-main().catch((e) => {
-  log("ERROR", `Erro fatal: ${e.message}`); process.exit(1);
-});
-
-// Servidor HTTP para o Render não derrubar o processo
-const PORT = process.env.PORT || 3000;
+// Servidor HTTP para manter o Render ativo (evita sleep no plano free)
+const http = require("http");
 http.createServer((req, res) => {
   res.writeHead(200);
-  res.end("Bot Anti-Raid online!");
-}).listen(PORT, () => {
-  log("INFO", `Servidor HTTP rodando na porta ${PORT}`);
+  res.end("Anti-Raid bot online!");
+}).listen(process.env.PORT || 3000, () => {
+  log("INFO", `Servidor HTTP ativo na porta ${process.env.PORT || 3000} (Render keep-alive)`);
+});
+
+main().catch((e) => {
+  log("ERROR", `Erro fatal: ${e.message}`); process.exit(1);
 });
