@@ -258,11 +258,16 @@ async function main() {
 ╚══════════════════════════════════════════╝
   `);
 
+  // Debug — mostra o que foi carregado das env vars
+  log("INFO", `ROBLOX_COOKIE: ${CONFIG.cookie ? "✅ carregado (" + CONFIG.cookie.length + " chars)" : "❌ VAZIO"}`);
+  log("INFO", `GROUP_ID: ${CONFIG.groupId || "❌ VAZIO"}`);
+  log("INFO", `OWNER_USER_ID: ${CONFIG.ownerUserId || "❌ VAZIO"}`);
+
   if (!CONFIG.cookie || CONFIG.cookie === "SEU_COOKIE_AQUI") {
-    log("ERROR", "Configure o ROBLOX_COOKIE no arquivo .env!"); process.exit(1);
+    log("ERROR", "Configure o ROBLOX_COOKIE no painel do Render (Environment Variables)!"); process.exit(1);
   }
   if (!CONFIG.groupId || isNaN(CONFIG.groupId)) {
-    log("ERROR", "Configure o GROUP_ID no arquivo .env!"); process.exit(1);
+    log("ERROR", "Configure o GROUP_ID no painel do Render (Environment Variables)!"); process.exit(1);
   }
 
   log("INFO", "Fazendo login no Roblox...");
