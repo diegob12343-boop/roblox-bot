@@ -45,12 +45,21 @@ async function getUsername(userId) {
 }
 
 // Busca actor com retry — audit log pode demorar a indexar
+// Só aceita entradas dos últimos 60 segundos para evitar pegar reversões antigas do bot
 async function getActorOfRankChange(targetId, retries = 5, delayMs = 1500) {
   for (let i = 0; i < retries; i++) {
     try {
       const page = await noblox.getAuditLog(CONFIG.groupId, "ChangeRank", null, "Desc", 25);
+      const agora = Date.now();
       for (const entry of (page.data || [])) {
         if (Number(entry.description?.TargetId) === Number(targetId)) {
+          // Verifica se a entrada é recente (últimos 60s)
+          const entryTime = new Date(entry.created).getTime();
+          const idadeSegundos = (agora - entryTime) / 1000;
+          if (idadeSegundos > 60) {
+            log("WARN", `Entrada do audit log muito antiga (${Math.round(idadeSegundos)}s) — ignorando`);
+            continue;
+          }
           const actorId = Number(entry.actor?.user?.userId);
           if (actorId) return actorId;
         }
@@ -95,8 +104,10 @@ async function handleRankChange(uid, cachedRank, newRank) {
   const actorName = actorId ? await getUsername(actorId) : "Desconhecido";
   log("INFO", `${username} actor: ${actorName} (${actorId})`);
 
-  // Ignora ação do próprio bot
-  if (Number(actorId) === Number(botUserId)) {
+  // Se o actor for o próprio bot, atualiza cache e ignora (foi uma reversão legítima do bot)
+  if (actorId && Number(actorId) === Number(botUserId)) {
+    log("INFO", `Ação do próprio bot em ${username} — ignorando.`);
+    rankCache.set(uid, newRank);
     return;
   }
 
@@ -115,9 +126,10 @@ async function handleRankChange(uid, cachedRank, newRank) {
     return;
   }
 
-  // Verifica se o actor tem rank isento (ex: rank 224 pode dar up/rebaixar livremente)
+  // Verifica se o actor tem rank isento (224, 254, 255 podem tudo)
   try {
     const actorRank = await noblox.getRankInGroup(CONFIG.groupId, actorId);
+    log("INFO", `Rank do actor ${actorName}: ${actorRank}`);
     if (CONFIG.exemptActorRanks.includes(actorRank)) {
       rankCache.set(uid, newRank);
       log("OK", `Actor ${actorName} rank ${actorRank} isento — liberado para ${username}.`);
@@ -145,7 +157,7 @@ async function handleRankChange(uid, cachedRank, newRank) {
 
   // Conta ups consecutivos na mesma pessoa (reseta após 30s sem novo up)
   const now = Date.now();
-  const entry = upCount.get(uid) || { count: 0, timer: null };
+  const entry = upCount.get(uid) || { count: 0, lastTime: null };
 
   // Reseta contagem se o último up foi há mais de 30s
   if (entry.lastTime && now - entry.lastTime > 30_000) {
@@ -158,7 +170,7 @@ async function handleRankChange(uid, cachedRank, newRank) {
 
   if (entry.count >= 2) {
     log("WARN", `RAID! ${actorName} deu ${entry.count} ups seguidos em ${username}. Revertendo...`);
-    upCount.delete(uid); // reseta contagem
+    upCount.delete(uid);
     await revertRank(uid, username, cachedRank, newRank,
       `${actorName} (${actorId}) deu ${entry.count} ups seguidos — possível raid`);
     return;
