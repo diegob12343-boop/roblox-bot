@@ -7,7 +7,8 @@ const CONFIG = {
   groupId: parseInt(process.env.GROUP_ID),
   ownerUserId: parseInt(process.env.OWNER_USER_ID),
   exemptUsers: (process.env.EXEMPT_USERS || "").split(",").map(id => parseInt(id.trim())).filter(id => !isNaN(id)),
-  exemptActorRanks: [224, 255],
+  // Ranks que podem dar up/rebaixar livremente sem limite de salto
+  exemptActorRanks: [224, 255], // ranks que podem dar up/rebaixar livremente
   maxRankJump: parseInt(process.env.MAX_RANK_JUMP) || 1,
   protectedRanks: (process.env.PROTECTED_RANKS || "")
     .split(",").map((r) => parseInt(r.trim())).filter((r) => !isNaN(r)),
@@ -15,8 +16,8 @@ const CONFIG = {
 };
 
 let botUserId = null;
-const rankCache = new Map();
-const upCount = new Map();
+const rankCache = new Map(); // userId -> rank
+const upCount = new Map();   // userId -> { count, timer }
 
 function log(type, msg) {
   const icons = { INFO: "ℹ️ ", WARN: "⚠️ ", ACTION: "🔒", ERROR: "❌", OK: "✅" };
@@ -44,6 +45,7 @@ async function getUsername(userId) {
   catch { return `UserID:${userId}`; }
 }
 
+// Busca actor com retry — audit log pode demorar a indexar
 async function getActorOfRankChange(targetId, retries = 5, delayMs = 1500) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -60,41 +62,6 @@ async function getActorOfRankChange(targetId, retries = 5, delayMs = 1500) {
     if (i < retries - 1) await sleep(delayMs);
   }
   return null;
-}
-
-// Resolve cargos duplicados — mantém o mais alto e remove o mais baixo
-async function fixDuplicateRoles(userId, username) {
-  try {
-    const roles = await noblox.getRoles(CONFIG.groupId);
-    const memberRoles = [];
-
-    for (const role of roles) {
-      if (role.rank === 0) continue;
-      try {
-        const members = await noblox.getPlayers(CONFIG.groupId, role.id);
-        const found = members.find(m => m.userId === userId);
-        if (found) memberRoles.push(role);
-      } catch (e) {}
-    }
-
-    if (memberRoles.length <= 1) return memberRoles[0]?.rank || null;
-
-    // Ordena do maior para o menor rank
-    memberRoles.sort((a, b) => b.rank - a.rank);
-    const highestRank = memberRoles[0].rank;
-
-    log("WARN", `${username} tem ${memberRoles.length} cargos duplicados! Mantendo rank ${highestRank}, removendo os demais...`);
-
-    // Define o rank mais alto (isso remove os duplicados automaticamente no Roblox)
-    await noblox.setRank(CONFIG.groupId, userId, highestRank);
-    rankCache.set(userId, highestRank);
-
-    log("OK", `${username} cargos duplicados corrigidos. Rank final: ${highestRank}`);
-    return highestRank;
-  } catch (e) {
-    log("ERROR", `Erro ao corrigir duplicados de ${username}: ${e.message}`);
-    return null;
-  }
 }
 
 async function revertRank(userId, username, oldRank, blockedRank, reason) {
@@ -115,20 +82,7 @@ async function revertRank(userId, username, oldRank, blockedRank, reason) {
       timestamp: new Date().toISOString(),
     });
   } catch (e) {
-    // Se erro de cargos duplicados, corrige primeiro e tenta novamente
-    if (e.message && e.message.includes("two or more")) {
-      log("WARN", `${username} tem cargos duplicados — corrigindo antes de reverter...`);
-      await fixDuplicateRoles(userId, username);
-      try {
-        await noblox.setRank(CONFIG.groupId, userId, oldRank);
-        rankCache.set(userId, oldRank);
-        log("ACTION", `✔ ${username} revertido para rank ${oldRank} após correção de duplicados.`);
-      } catch (e2) {
-        log("ERROR", `Falha ao reverter ${username} após correção: ${e2.message}`);
-      }
-    } else {
-      log("ERROR", `Falha ao reverter ${username}: ${e.message}`);
-    }
+    log("ERROR", `Falha ao reverter ${username}: ${e.message}`);
   }
 }
 
@@ -142,14 +96,19 @@ async function handleRankChange(uid, cachedRank, newRank) {
   const actorName = actorId ? await getUsername(actorId) : "Desconhecido";
   log("INFO", `${username} actor: ${actorName} (${actorId})`);
 
-  if (Number(actorId) === Number(botUserId)) return;
+  // Ignora ação do próprio bot
+  if (Number(actorId) === Number(botUserId)) {
+    return;
+  }
 
+  // Actor desconhecido mesmo após retries → REVERTE por segurança
   if (!actorId) {
     log("WARN", `Actor desconhecido para ${username} após retries — revertendo por segurança.`);
     await revertRank(uid, username, cachedRank, newRank, "Actor desconhecido — possível raid");
     return;
   }
 
+  // Dono e isentos por userId podem tudo
   const allExemptUsers = [Number(CONFIG.ownerUserId), ...CONFIG.exemptUsers];
   if (allExemptUsers.includes(Number(actorId))) {
     rankCache.set(uid, newRank);
@@ -157,6 +116,7 @@ async function handleRankChange(uid, cachedRank, newRank) {
     return;
   }
 
+  // Verifica se o actor tem rank isento (ex: rank 224 pode dar up/rebaixar livremente)
   try {
     const actorRank = await noblox.getRankInGroup(CONFIG.groupId, actorId);
     if (CONFIG.exemptActorRanks.includes(actorRank)) {
@@ -168,6 +128,7 @@ async function handleRankChange(uid, cachedRank, newRank) {
     log("WARN", `Não foi possível checar rank do actor ${actorId}: ${e.message}`);
   }
 
+  // Rebaixamento bloqueado para não-isentos
   if (jump < 0) {
     log("WARN", `RAID! ${actorName} rebaixou ${username} (${cachedRank}→${newRank}). Revertendo...`);
     await revertRank(uid, username, cachedRank, newRank,
@@ -175,6 +136,7 @@ async function handleRankChange(uid, cachedRank, newRank) {
     return;
   }
 
+  // Cargo protegido
   if (CONFIG.protectedRanks.includes(newRank)) {
     log("ACTION", `Cargo ${newRank} protegido! ${actorName} tentou promover ${username}. Revertendo...`);
     await revertRank(uid, username, cachedRank, newRank,
@@ -182,10 +144,14 @@ async function handleRankChange(uid, cachedRank, newRank) {
     return;
   }
 
+  // Conta ups consecutivos na mesma pessoa (reseta após 30s sem novo up)
   const now = Date.now();
-  const entry = upCount.get(uid) || { count: 0, lastTime: null };
+  const entry = upCount.get(uid) || { count: 0, timer: null };
 
-  if (entry.lastTime && now - entry.lastTime > 30_000) entry.count = 0;
+  // Reseta contagem se o último up foi há mais de 30s
+  if (entry.lastTime && now - entry.lastTime > 30_000) {
+    entry.count = 0;
+  }
 
   entry.count += 1;
   entry.lastTime = now;
@@ -193,46 +159,56 @@ async function handleRankChange(uid, cachedRank, newRank) {
 
   if (entry.count >= 2) {
     log("WARN", `RAID! ${actorName} deu ${entry.count} ups seguidos em ${username}. Revertendo...`);
-    upCount.delete(uid);
+    upCount.delete(uid); // reseta contagem
     await revertRank(uid, username, cachedRank, newRank,
       `${actorName} (${actorId}) deu ${entry.count} ups seguidos — possível raid`);
     return;
   }
 
+  // Legítimo (1º up)
   rankCache.set(uid, newRank);
   log("OK", `${actorName} promoveu ${username}: rank ${cachedRank}→${newRank}`);
 }
 
+// Polling por roles em lote — snapshot completo e rápido
 async function pollRanks() {
   try {
     const roles = await noblox.getRoles(CONFIG.groupId);
+
+    // Monta snapshot atual: userId -> rank
     const currentSnapshot = new Map();
     for (const role of roles) {
       if (role.rank === 0) continue;
       try {
         const members = await noblox.getPlayers(CONFIG.groupId, role.id);
         for (const member of members) {
-          // Se já existe no snapshot, tem cargo duplicado — mantém o maior
-          const existing = currentSnapshot.get(member.userId);
-          if (!existing || role.rank > existing) {
-            currentSnapshot.set(member.userId, role.rank);
-          }
+          currentSnapshot.set(member.userId, role.rank);
         }
-      } catch (e) {}
+      } catch (e) { /* role vazio, ignora */ }
     }
 
+    // Detecta mudanças comparando com cache
     const changes = [];
     for (const [uid, newRank] of currentSnapshot.entries()) {
       const cachedRank = rankCache.get(uid);
-      if (cachedRank === undefined) { rankCache.set(uid, newRank); continue; }
-      if (cachedRank !== newRank) changes.push({ uid, cachedRank, newRank });
+      if (cachedRank === undefined) {
+        rankCache.set(uid, newRank); // novo membro
+        continue;
+      }
+      if (cachedRank !== newRank) {
+        changes.push({ uid, cachedRank, newRank });
+      }
     }
 
     if (changes.length === 0) return;
+
     log("INFO", `${changes.length} mudança(s) detectada(s) — processando...`);
+
+    // Processa todas as mudanças em paralelo
     await Promise.all(changes.map(({ uid, cachedRank, newRank }) =>
       handleRankChange(uid, cachedRank, newRank)
     ));
+
   } catch (e) {
     log("ERROR", `Erro no polling: ${e.message}`);
   }
@@ -247,14 +223,9 @@ async function loadAllMembers() {
       if (role.rank === 0) continue;
       try {
         const members = await noblox.getPlayers(CONFIG.groupId, role.id);
-        for (const member of members) {
-          const existing = rankCache.get(member.userId);
-          if (!existing || role.rank > existing) {
-            rankCache.set(member.userId, role.rank);
-          }
-        }
+        for (const member of members) rankCache.set(member.userId, role.rank);
         total += members.length;
-      } catch (e) {}
+      } catch (e) { }
     }
     log("OK", `${total} membros carregados.`);
   } catch (e) {
@@ -265,11 +236,18 @@ async function loadAllMembers() {
 function startPolling() {
   let running = false;
   setInterval(async () => {
-    if (running) { log("WARN", "Ciclo anterior ainda em andamento — pulando..."); return; }
+    if (running) {
+      log("WARN", "Ciclo anterior ainda em andamento — pulando...");
+      return;
+    }
     running = true;
-    try { await pollRanks(); }
-    catch (e) { log("ERROR", `Polling falhou: ${e.message}`); }
-    finally { running = false; }
+    try {
+      await pollRanks();
+    } catch (e) {
+      log("ERROR", `Polling falhou: ${e.message}`);
+    } finally {
+      running = false;
+    }
   }, 6_000);
 }
 
@@ -312,8 +290,13 @@ async function main() {
 
   await loadAllMembers();
 
-  process.on("uncaughtException", (e) => { log("ERROR", `Erro não capturado: ${e.message}`); });
-  process.on("unhandledRejection", (reason) => { log("ERROR", `Promise rejeitada: ${reason}`); });
+  // Handler global — bot não crasha por ECONNRESET ou outros erros
+  process.on("uncaughtException", (e) => {
+    log("ERROR", `Erro não capturado: ${e.message}`);
+  });
+  process.on("unhandledRejection", (reason) => {
+    log("ERROR", `Promise rejeitada: ${reason}`);
+  });
 
   log("INFO", "Monitoramento iniciado! Verificando a cada 6 segundos...\n");
   startPolling();
