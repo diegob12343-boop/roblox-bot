@@ -62,6 +62,41 @@ async function getActorOfRankChange(targetId, retries = 5, delayMs = 1500) {
   return null;
 }
 
+// Resolve cargos duplicados — mantém o mais alto e remove o mais baixo
+async function fixDuplicateRoles(userId, username) {
+  try {
+    const roles = await noblox.getRoles(CONFIG.groupId);
+    const memberRoles = [];
+
+    for (const role of roles) {
+      if (role.rank === 0) continue;
+      try {
+        const members = await noblox.getPlayers(CONFIG.groupId, role.id);
+        const found = members.find(m => m.userId === userId);
+        if (found) memberRoles.push(role);
+      } catch (e) {}
+    }
+
+    if (memberRoles.length <= 1) return memberRoles[0]?.rank || null;
+
+    // Ordena do maior para o menor rank
+    memberRoles.sort((a, b) => b.rank - a.rank);
+    const highestRank = memberRoles[0].rank;
+
+    log("WARN", `${username} tem ${memberRoles.length} cargos duplicados! Mantendo rank ${highestRank}, removendo os demais...`);
+
+    // Define o rank mais alto (isso remove os duplicados automaticamente no Roblox)
+    await noblox.setRank(CONFIG.groupId, userId, highestRank);
+    rankCache.set(userId, highestRank);
+
+    log("OK", `${username} cargos duplicados corrigidos. Rank final: ${highestRank}`);
+    return highestRank;
+  } catch (e) {
+    log("ERROR", `Erro ao corrigir duplicados de ${username}: ${e.message}`);
+    return null;
+  }
+}
+
 async function revertRank(userId, username, oldRank, blockedRank, reason) {
   try {
     if (oldRank === undefined || oldRank === blockedRank) return;
@@ -80,7 +115,20 @@ async function revertRank(userId, username, oldRank, blockedRank, reason) {
       timestamp: new Date().toISOString(),
     });
   } catch (e) {
-    log("ERROR", `Falha ao reverter ${username}: ${e.message}`);
+    // Se erro de cargos duplicados, corrige primeiro e tenta novamente
+    if (e.message && e.message.includes("two or more")) {
+      log("WARN", `${username} tem cargos duplicados — corrigindo antes de reverter...`);
+      await fixDuplicateRoles(userId, username);
+      try {
+        await noblox.setRank(CONFIG.groupId, userId, oldRank);
+        rankCache.set(userId, oldRank);
+        log("ACTION", `✔ ${username} revertido para rank ${oldRank} após correção de duplicados.`);
+      } catch (e2) {
+        log("ERROR", `Falha ao reverter ${username} após correção: ${e2.message}`);
+      }
+    } else {
+      log("ERROR", `Falha ao reverter ${username}: ${e.message}`);
+    }
   }
 }
 
@@ -135,7 +183,7 @@ async function handleRankChange(uid, cachedRank, newRank) {
   }
 
   const now = Date.now();
-  const entry = upCount.get(uid) || { count: 0, timer: null };
+  const entry = upCount.get(uid) || { count: 0, lastTime: null };
 
   if (entry.lastTime && now - entry.lastTime > 30_000) entry.count = 0;
 
@@ -163,8 +211,14 @@ async function pollRanks() {
       if (role.rank === 0) continue;
       try {
         const members = await noblox.getPlayers(CONFIG.groupId, role.id);
-        for (const member of members) currentSnapshot.set(member.userId, role.rank);
-      } catch (e) { }
+        for (const member of members) {
+          // Se já existe no snapshot, tem cargo duplicado — mantém o maior
+          const existing = currentSnapshot.get(member.userId);
+          if (!existing || role.rank > existing) {
+            currentSnapshot.set(member.userId, role.rank);
+          }
+        }
+      } catch (e) {}
     }
 
     const changes = [];
@@ -193,9 +247,14 @@ async function loadAllMembers() {
       if (role.rank === 0) continue;
       try {
         const members = await noblox.getPlayers(CONFIG.groupId, role.id);
-        for (const member of members) rankCache.set(member.userId, role.rank);
+        for (const member of members) {
+          const existing = rankCache.get(member.userId);
+          if (!existing || role.rank > existing) {
+            rankCache.set(member.userId, role.rank);
+          }
+        }
         total += members.length;
-      } catch (e) { }
+      } catch (e) {}
     }
     log("OK", `${total} membros carregados.`);
   } catch (e) {
